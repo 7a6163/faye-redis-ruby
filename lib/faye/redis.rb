@@ -1,11 +1,10 @@
 require 'em-hiredis'
 require 'multi_json'
 
-require File.expand_path('../redis_factory', __FILE__)
+require File.expand_path('redis_factory', __dir__)
 
 module Faye
   class Redis
-
     DEFAULT_GC   = 60
     LOCK_TIMEOUT = 120
 
@@ -22,7 +21,7 @@ module Faye
     end
 
     def init
-      return if @redis or !EventMachine.reactor_running?
+      return if @redis || !EventMachine.reactor_running?
 
       gc     = @options[:gc]        || DEFAULT_GC
       @ns    = @options[:namespace] || ''
@@ -41,10 +40,22 @@ module Faye
       end
 
       @gc = EventMachine.add_periodic_timer(gc, &method(:gc))
+      @subscriber.on(:failed) do
+        @server.error 'Faye::Redis: redis connection failed'
+        @redis = nil
+        raise 'Could not connect to redis'
+      end
+
+      @redis.on(:failed) do
+        @server.error 'Faye::Redis: redis connection failed'
+        @redis = nil
+        raise 'Could not connect to redis'
+      end
     end
 
     def disconnect
       return unless @redis
+
       @subscriber.unsubscribe(@message_channel)
       @subscriber.unsubscribe(@close_channel)
       EventMachine.cancel_timer(@gc)
@@ -54,7 +65,8 @@ module Faye
       init
       client_id = @server.generate_id
       @redis.zadd(@ns + '/clients', 0, client_id) do |added|
-        next create_client(&callback) if added == 0
+        next create_client(&callback) if added.zero?
+
         @server.debug 'Created new client ?', client_id
         ping(client_id)
         @server.trigger(:handshake, client_id)
@@ -75,7 +87,8 @@ module Faye
       init
       @redis.zadd(@ns + '/clients', 0, client_id) do
         @redis.smembers(@ns + "/clients/#{client_id}/channels") do |channels|
-          i, n = 0, channels.size
+          i = 0
+          n = channels.size
           next after_subscriptions_removed(client_id, &callback) if i == n
 
           channels.each do |channel|
@@ -94,7 +107,7 @@ module Faye
           @server.debug 'Destroyed client ?', client_id
           @server.trigger(:disconnect, client_id)
           @redis.publish(@close_channel, client_id)
-          callback.call if callback
+          callback&.call
         end
       end
     end
@@ -116,7 +129,7 @@ module Faye
       end
       @redis.sadd(@ns + "/channels#{channel}", client_id) do
         @server.debug 'Subscribed client ? to channel ?', client_id, channel
-        callback.call if callback
+        callback&.call
       end
     end
 
@@ -127,7 +140,7 @@ module Faye
       end
       @redis.srem(@ns + "/channels#{channel}", client_id) do
         @server.debug 'Unsubscribed client ? from channel ?', client_id, channel
-        callback.call if callback
+        callback&.call
       end
     end
 
@@ -158,6 +171,7 @@ module Faye
 
     def empty_queue(client_id)
       return unless @server.has_connection?(client_id)
+
       init
 
       key = @ns + "/clients/#{client_id}/messages"
@@ -165,14 +179,15 @@ module Faye
       @redis.multi
       @redis.lrange(key, 0, -1)
       @redis.del(key)
-      @redis.exec.callback  do |json_messages, deleted|
+      @redis.exec.callback do |json_messages, _deleted|
         next unless json_messages
+
         messages = json_messages.map { |json| MultiJson.load(json) }
         @server.deliver(client_id, messages)
       end
     end
 
-  private
+    private
 
     def get_current_time
       (Time.now.to_f * 1000).to_i
@@ -185,7 +200,8 @@ module Faye
       with_lock 'gc' do |release_lock|
         cutoff = get_current_time - 1000 * 2 * timeout
         @redis.zrangebyscore(@ns + '/clients', 0, cutoff) do |clients|
-          i, n = 0, clients.size
+          i = 0
+          n = clients.size
           next release_lock.call if i == n
 
           clients.each do |client_id|
@@ -222,6 +238,5 @@ module Faye
         end
       end
     end
-
   end
 end

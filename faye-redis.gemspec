@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name              = 'faye-redis'
-  s.version           = '0.5.0'
+  s.version           = '0.5.1'
   s.summary           = 'Redis backend engine for Faye'
   s.author            = 'James Coglan'
   s.email             = 'jcoglan@gmail.com'

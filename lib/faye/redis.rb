@@ -61,8 +61,18 @@ module Faye
         handle_connection_failure
       end
 
+      @subscriber.on(:disconnected) do
+        @server.error 'Faye::Redis: subscriber connection disconnected, attempting to reconnect'
+        handle_connection_failure
+      end
+
       @redis.on(:failed) do
         @server.error 'Faye::Redis: redis connection failed, attempting to reconnect'
+        handle_connection_failure
+      end
+
+      @redis.on(:disconnected) do
+        @server.error 'Faye::Redis: redis connection disconnected, attempting to reconnect'
         handle_connection_failure
       end
 
@@ -127,10 +137,15 @@ module Faye
           next after_subscriptions_removed(client_id, &callback) if n.zero?
 
           completed = 0
+          cleanup_called = false
+
           channels.each do |channel|
             unsubscribe(client_id, channel) do
               completed += 1
-              after_subscriptions_removed(client_id, &callback) if completed == n
+              if completed == n && !cleanup_called
+                cleanup_called = true
+                after_subscriptions_removed(client_id, &callback)
+              end
             end
           end
         end.errback do |error|
@@ -143,16 +158,19 @@ module Faye
     end
 
     def after_subscriptions_removed(client_id, &callback)
+      return callback&.call unless @redis
+
       @redis.multi
       @redis.del(client_messages_key(client_id))
       @redis.zrem(clients_key, client_id)
       @redis.exec.callback do
         @server.debug 'Destroyed client ?', client_id
         @server.trigger(:disconnect, client_id)
-        @redis.publish(@close_channel, client_id)
+        @redis.publish(@close_channel, client_id) if @redis
         callback&.call
       end.errback do |error|
         @server.error "Faye::Redis: failed to remove client #{client_id} - #{error.message}"
+        callback&.call
       end
     end
 
@@ -174,8 +192,10 @@ module Faye
       @redis.sadd(client_channels_key(client_id), channel)
       @redis.sadd(channel_key(channel), client_id)
       @redis.exec.callback do |results|
-        added = results[0]
-        @server.trigger(:subscribe, client_id, channel) if added == 1
+        if results && results[0]
+          added = results[0]
+          @server.trigger(:subscribe, client_id, channel) if added == 1
+        end
         @server.debug 'Subscribed client ? to channel ?', client_id, channel
         callback&.call
       end.errback do |error|
@@ -189,8 +209,10 @@ module Faye
       @redis.srem(client_channels_key(client_id), channel)
       @redis.srem(channel_key(channel), client_id)
       @redis.exec.callback do |results|
-        removed = results[0]
-        @server.trigger(:unsubscribe, client_id, channel) if removed == 1
+        if results && results[0]
+          removed = results[0]
+          @server.trigger(:unsubscribe, client_id, channel) if removed == 1
+        end
         @server.debug 'Unsubscribed client ? from channel ?', client_id, channel
         callback&.call
       end.errback do |error|
@@ -198,7 +220,7 @@ module Faye
       end
     end
 
-    def publish(message, channels)
+    def publish(message, _channels)
       init
       @server.debug 'Publishing message ?', message
 
@@ -295,10 +317,15 @@ module Faye
           next release_lock.call if n.zero?
 
           completed = 0
+          lock_released = false
+
           clients.each do |client_id|
             destroy_client(client_id) do
               completed += 1
-              release_lock.call if completed == n
+              if completed == n && !lock_released
+                lock_released = true
+                release_lock.call
+              end
             end
           end
         end.errback do |error|
@@ -323,12 +350,18 @@ module Faye
       cleanup_connection
 
       EventMachine.add_timer(delay) do
-        @reconnecting = false
         begin
           init
-          @reconnect_attempts = 0 if @initialized
+          if @initialized
+            @reconnect_attempts = 0
+            @reconnecting = false
+          else
+            @reconnecting = false
+            handle_connection_failure
+          end
         rescue => e
           @server.error "Faye::Redis: reconnection failed - #{e.message}"
+          @reconnecting = false
           handle_connection_failure
         end
       end
@@ -340,22 +373,32 @@ module Faye
       expiry       = current_time + LOCK_TIMEOUT * 1000 + 1
 
       release_lock = lambda do
-        @redis.del(key) if get_current_time < expiry
+        @redis&.del(key) if @redis && get_current_time < expiry
       end
 
       @redis.setnx(key, expiry) do |set|
         next block.call(release_lock) if set == 1
 
+        # Lock already held, check if it's expired
         @redis.get(key) do |timeout|
           next unless timeout
 
           lock_timeout = timeout.to_i(10)
-          next if current_time < lock_timeout
-
-          @redis.getset(key, expiry) do |old_value|
-            block.call(release_lock) if old_value == timeout
+          if current_time >= lock_timeout
+            # Lock expired, try to acquire it
+            @redis.getset(key, expiry) do |old_value|
+              block.call(release_lock) if old_value == timeout
+            end.errback do |error|
+              @server.error "Faye::Redis: failed to acquire expired lock - #{error.message}"
+            end
+          else
+            @server.debug 'Faye::Redis: lock ? already held and not expired', lock_name
           end
+        end.errback do |error|
+          @server.error "Faye::Redis: failed to check lock - #{error.message}"
         end
+      end.errback do |error|
+        @server.error "Faye::Redis: failed to acquire lock - #{error.message}"
       end
     end
   end

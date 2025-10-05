@@ -35,6 +35,8 @@ The full list of settings is as follows.
 * <b>`:namespace`</b> - prefix applied to all keys, default is `''`
 * <b>`:socket`</b> - path to Unix socket if `unixsocket` is set
 
+The engine will automatically reconnect on Redis connection failures.
+
 
 ## License
 

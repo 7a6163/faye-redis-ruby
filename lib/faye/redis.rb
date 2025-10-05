@@ -95,7 +95,7 @@ module Faye
       @reconnect_attempts = 0
     end
 
-    def create_client(&callback, retries = 0)
+    def create_client(retries = 0, &callback)
       init
 
       if retries >= MAX_CLIENT_ID_RETRIES
@@ -105,7 +105,7 @@ module Faye
 
       client_id = @server.generate_id
       @redis.zadd(clients_key, 0, client_id) do |added|
-        next create_client(&callback, retries + 1) if added.zero?
+        next create_client(retries + 1, &callback) if added.zero?
 
         @server.debug 'Created new client ?', client_id
         ping(client_id)
@@ -113,7 +113,7 @@ module Faye
         callback.call(client_id)
       end.errback do |error|
         @server.error "Faye::Redis: failed to create client - #{error.message}"
-        create_client(&callback, retries + 1)
+        create_client(retries + 1, &callback)
       end
     end
 

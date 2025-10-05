@@ -15,7 +15,7 @@ Gem::Specification.new do |s|
 
   s.add_dependency 'em-hiredis', '>= 0.3.1'
   s.add_dependency 'eventmachine', '>= 1.2.7'
-  s.add_dependency 'multi_json', '>= 1.17.0'
+  s.add_dependency 'multi_json', '>= 1.15.0'
 
   s.add_development_dependency 'rspec'
   s.add_development_dependency 'rspec-eventmachine'

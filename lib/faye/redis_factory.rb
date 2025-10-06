@@ -10,19 +10,22 @@ module Faye
     end
 
     def call
-      uri    = @options[:uri]      || nil
-      socket = @options[:socket]   || nil
-      host   = @options[:host]     || DEFAULT_HOST
-      port   = @options[:port]     || DEFAULT_PORT
-      auth   = @options[:password] || nil
-      db     = @options[:database] || DEFAULT_DATABASE
-
-      if uri
-        EventMachine::Hiredis.connect(uri)
-      elsif socket
-        EventMachine::Hiredis::Client.new(socket, nil, auth, db).connect
+      if @options[:uri]
+        EventMachine::Hiredis.connect(@options[:uri])
+      elsif @options[:socket]
+        EventMachine::Hiredis::Client.new(
+          @options[:socket],
+          nil,
+          @options[:password],
+          @options[:database] || DEFAULT_DATABASE
+        ).connect
       else
-        EventMachine::Hiredis::Client.new(host, port, auth, db).connect
+        EventMachine::Hiredis::Client.new(
+          @options[:host] || DEFAULT_HOST,
+          @options[:port] || DEFAULT_PORT,
+          @options[:password],
+          @options[:database] || DEFAULT_DATABASE
+        ).connect
       end
     end
 
